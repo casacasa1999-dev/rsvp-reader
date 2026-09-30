@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>RSVP Reader</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="RSVP">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<section id="library" class="view">
+  <header class="bar">
+    <h1>ライブラリ</h1>
+    <label class="btn primary" for="file">＋ 追加</label>
+    <input id="file" type="file" accept=".epub,.pdf,application/epub+zip,application/pdf" hidden>
+  </header>
+  <ul id="books"></ul>
+  <p id="empty" class="hint" hidden>
+    「＋ 追加」から EPUB または PDF を読み込んでください。<br>
+    ファイルはこの端末内にのみ保存されます。
+  </p>
+</section>
+
+<section id="reader" class="view" hidden>
+  <header class="bar">
+    <button id="back" class="btn" aria-label="ライブラリへ戻る">‹ 戻る</button>
+    <div id="title"></div>
+    <select id="chapters" aria-label="章を選択"></select>
+  </header>
+
+  <div id="stage" role="button" aria-label="再生・一時停止">
+    <div class="guide top"></div>
+    <div id="orp"><span id="pre"></span><span id="pivot"></span><span id="post"></span></div>
+    <div id="plain" hidden></div>
+    <div class="guide bottom"></div>
+  </div>
+
+  <div id="context"></div>
+
+  <footer>
+    <input id="seek" type="range" min="0" max="0" value="0" aria-label="読書位置">
+    <div id="status"></div>
+    <div class="controls">
+      <button id="sentence" class="btn" aria-label="文頭へ戻る">⏮</button>
+      <button id="rew" class="btn" aria-label="10チャンク戻る">−10</button>
+      <button id="play" class="btn primary" aria-label="再生">▶</button>
+      <button id="fwd" class="btn" aria-label="10チャンク進む">+10</button>
+    </div>
+    <div class="settings">
+      <div class="stepper">
+        <button id="slower" class="btn" aria-label="遅く">−</button>
+        <div id="speed"></div>
+        <button id="faster" class="btn" aria-label="速く">＋</button>
+      </div>
+      <div class="stepper">
+        <button id="smaller" class="btn" aria-label="文字を小さく">A−</button>
+        <button id="larger" class="btn" aria-label="文字を大きく">A＋</button>
+      </div>
+    </div>
+  </footer>
+</section>
+
+<div id="busy" hidden><div id="busyText">読み込み中…</div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
