@@ -1,4 +1,4 @@
-const CACHE = 'rsvp-v1';
+const CACHE = 'rsvp-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-512.png'];
 const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/';
 const CDN = [PDFJS_BASE + 'legacy/build/pdf.min.mjs', PDFJS_BASE + 'legacy/build/pdf.worker.min.mjs'];

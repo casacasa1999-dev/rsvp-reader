@@ -301,6 +301,46 @@ async function importPdf(buf, fallbackTitle, onProgress) {
   return { title: info?.info?.Title?.trim() || fallbackTitle, paras, chapters };
 }
 
+/* ---------- Text import ---------- */
+
+// Plain text: one paragraph per line; form feeds (\f, as written by tools/kindle2txt) mark pages.
+// Accepts UTF-8 / UTF-16 / Shift_JIS / EUC-JP (Aozora Bunko files are Shift_JIS).
+function decodeText(buf) {
+  const u8 = new Uint8Array(buf);
+  if (u8[0] === 0xff && u8[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf);
+  if (u8[0] === 0xfe && u8[1] === 0xff) return new TextDecoder('utf-16be').decode(buf);
+  for (const enc of ['utf-8', 'shift_jis', 'euc-jp']) {
+    try { return new TextDecoder(enc, { fatal: true }).decode(buf); } catch {}
+  }
+  return null;
+}
+
+// Strips Aozora Bunko markup: ruby 《》, ruby base marker ｜, ［＃…］ notes and the header/footer.
+function stripAozora(src) {
+  if (!/《[^》\n]+》|［＃/.test(src)) return src;
+  return src
+    .replace(/^[\s\S]*?\n-{20,}\n[\s\S]*?\n-{20,}\n/, '')
+    .replace(/\n底本：[\s\S]*$/, '')
+    .replace(/《[^》\n]*》/g, '')
+    .replace(/［＃[^］\n]*］/g, '')
+    .replace(/｜/g, '');
+}
+
+function importText(buf, fallbackTitle) {
+  const decoded = decodeText(buf);
+  if (decoded === null) throw new Error('テキストの文字コードを判別できませんでした。UTF-8 または Shift_JIS で保存してください。');
+  const src = stripAozora(decoded.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n'));
+  const pages = src.split('\f');
+  const paras = [], chapters = [];
+  pages.forEach((page, k) => {
+    const found = page.split('\n').map(cleanPara).filter(Boolean);
+    if (!found.length) return;
+    if (pages.length > 1) chapters.push({ title: `p.${k + 1}`, para: paras.length });
+    paras.push(...found);
+  });
+  return { title: fallbackTitle, paras, chapters };
+}
+
 /* ---------- Library ---------- */
 
 function busy(text) {
@@ -317,7 +357,8 @@ async function importFile(file) {
     let book, type;
     if (head[0] === 0x25 && head[1] === 0x50) { type = 'PDF'; book = await importPdf(buf, base, busy); }
     else if (head[0] === 0x50 && head[1] === 0x4b) { type = 'EPUB'; book = await importEpub(buf, base); }
-    else throw new Error('EPUB または PDF ファイルを選んでください。');
+    else if (/\.(txt|text|md)$/i.test(file.name) || file.type.startsWith('text/') || decodeText(buf) !== null) { type = 'TXT'; book = importText(buf, base); }
+    else throw new Error('EPUB・PDF・テキストファイルを選んでください。');
     if (!book.paras.length) throw new Error('本文を取り出せませんでした。');
     busy('文章を分割中…');
     const { n } = tokenize(book.paras);
