@@ -581,6 +581,11 @@ document.addEventListener('keydown', ev => {
   if (actions[ev.key]) { ev.preventDefault(); actions[ev.key](); }
 });
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+if ('serviceWorker' in navigator) {
+  // Reload once when an updated service worker takes over, so the new version shows immediately.
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) location.reload(); });
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
+}
 navigator.storage?.persist?.();
 renderLibrary();

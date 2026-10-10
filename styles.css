@@ -66,6 +66,7 @@ body {
 .btn:active { opacity: .6; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
+.version { color: var(--dim); font-size: 11px; text-align: center; margin: 8px 0; }
 .hint { color: var(--dim); text-align: center; line-height: 1.8; padding: 48px 24px; }
 
 /* Library */
