@@ -50,6 +50,14 @@ const OPEN = '「『（(［[【〈《〔｛“‘';
 const LEADING_OPEN = /^[「『（(［[【〈《〔｛“‘]+/;
 const VERB_STEM = /^[㐀-鿿々]+[ぁ-ん]?[いきぎしじちびみりえけげせめれべ]$/;
 const ALL_KANJI = /^[㐀-鿿々]+$/;
+// Katakana words (ー included); a trailing ・ or ＝ joins names like ハリー・ポッター.
+const KATAKANA_END = /[ァ-ヺー][・＝=]?$/;
+const KATAKANA_START = /^[ァ-ヺー]/;
+const ALL_KATAKANA = /^[ァ-ヺー・＝=]+$/;
+// After one of these particles, a following run of 3+ hiragana is usually a new phrase
+// (プレゼントを / もらった) — unless it starts with another particle or a function word.
+const PARTICLES = new Set(['を', 'が', 'に', 'へ']);
+const NOT_AFTER_PARTICLE = /^([はでのやかと]|ない|なく|なかっ|いう|いっ|いる|ある|あっ|して|する|した|しよう|しな|しま|され|させ|でき)/;
 // Kana-only words that begin a new phrase rather than attach to the previous one.
 const STARTERS = new Set(('これ それ あれ どれ ここ そこ あそこ どこ この その あの どの こんな そんな あんな どんな '
   + 'こう そう どう とても かなり もっと もう まだ また すぐ ずっと やはり やっぱり ちょっと すこし たくさん '
@@ -72,10 +80,17 @@ function segments(run) {
 // Groups morphemes into phrase-sized chunks (roughly 文節): a content word plus
 // the particles / auxiliaries that follow it.
 function splitJa(run, out) {
-  let cur = '', flushNext = false;
+  let cur = '', flushNext = false, last = '';
   const flush = () => { if (cur) out.push(cur); cur = ''; flushNext = false; };
   const onlyOpen = () => [...cur].every(c => OPEN.includes(c));
-  for (const { segment: s, isWordLike } of segments(run)) {
+  const segs = Array.from(segments(run));
+  const hiraganaRun = k => {
+    let t = '';
+    for (let j = k; j < segs.length && /^[ぁ-ん]+$/.test(segs[j].segment); j++) t += segs[j].segment;
+    return t;
+  };
+  for (let k = 0; k < segs.length; k++) {
+    const { segment: s, isWordLike } = segs[k];
     if (!isWordLike) {
       if (OPEN.includes(s[0])) {
         if (!onlyOpen()) flush();
@@ -84,27 +99,38 @@ function splitJa(run, out) {
         cur += s;
         if (BREAK_PUNCT.test(s)) flushNext = true;
       }
+      last = s;
       continue;
     }
     if (flushNext) flush();
     const len = cur.length + s.length;
+    const body = cur.replace(LEADING_OPEN, '');
     if (!cur || onlyOpen()) cur += s;
-    else if (CONTENT_START.test(s)) {
-      const body = cur.replace(LEADING_OPEN, '');
+    else if (KATAKANA_END.test(cur) && KATAKANA_START.test(s) && len <= 16) {
+      // The segmenter splits katakana words into dictionary pieces (ニュー + ヨーク, カス + タマ + ー).
+      cur += s;
+    } else if (CONTENT_START.test(s)) {
       const join = (/[0-9０-９]$/.test(cur) && len <= 8)
         // 飛び + 込む, 思い + 直す: verb stem followed by another verb
         || (VERB_STEM.test(body) && !body.endsWith('しい') && KANJI.test(s[0]) && len <= 7)
         // 東京 + 都知事: compound noun
-        || (ALL_KANJI.test(body) && ALL_KANJI.test(s) && len <= 5);
+        || (ALL_KANJI.test(body) && ALL_KANJI.test(s) && len <= 5)
+        // アメリカ + 合衆国, ロンドン + 出身
+        || (ALL_KATAKANA.test(body) && ALL_KANJI.test(s) && len <= 8);
       if (join) cur += s;
       else { flush(); cur = s; }
     } else {
       // Kana right after kanji is an inflection (込 + もう), never a new word.
       const afterKana = /[ぁ-ん]$/.test(cur);
-      const split = len > 12 || (afterKana && (STARTERS.has(s) || (cur.length >= 7 && s.length >= 3)));
+      const following = PARTICLES.has(last) && cur.length > 1 ? hiraganaRun(k) : '';
+      const afterParticle = following.length >= 3 && !NOT_AFTER_PARTICLE.test(following);
+      // Otherwise a single kana (particle) always stays with its word, however long: ニューヨーク + の.
+      const split = afterParticle || (s.length >= 2 && (len > 14
+        || (afterKana && (STARTERS.has(s) || (cur.length >= 7 && s.length >= 3)))));
       if (split) { flush(); cur = s; }
       else cur += s;
     }
+    last = s;
   }
   flush();
 }
