@@ -27,7 +27,22 @@
     「＋ 追加」から EPUB・PDF・テキストを読み込んでください。<br>
     ファイルはこの端末内にのみ保存されます。
   </p>
-  <p class="version">バージョン 5.00</p>
+  <details id="voices">
+    <summary>読み上げの声</summary>
+    <label class="voice-row">日本語
+      <select id="voice-ja"></select>
+      <button id="try-ja" class="btn" type="button">試聴</button>
+    </label>
+    <label class="voice-row">英語
+      <select id="voice-en"></select>
+      <button id="try-en" class="btn" type="button">試聴</button>
+    </label>
+    <p class="voice-note">
+      <span id="voice-count"></span><br>
+      Siriの声はSafariからは使えません。一覧に無い声は、設定 → アクセシビリティ → 読み上げコンテンツ → 声 でダウンロード後、アプリを開き直すと表示されます。
+    </p>
+  </details>
+  <p class="version">バージョン 5.02</p>
 </section>
 
 <section id="reader" class="view" hidden>
@@ -70,6 +85,7 @@
   </footer>
 </section>
 
+<div id="notice" role="alert" hidden></div>
 <div id="busy" hidden><div id="busyText">読み込み中…</div></div>
 
 <script src="app.js"></script>

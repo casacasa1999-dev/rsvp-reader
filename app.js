@@ -535,7 +535,7 @@ function step() {
 const tts = 'speechSynthesis' in window ? window.speechSynthesis : null;
 const speaking = () => !!(tts && settings.tts);
 let voices = [];
-const loadVoices = () => { voices = tts.getVoices(); };
+const loadVoices = () => { voices = tts.getVoices(); renderVoices(); };
 if (tts) { loadVoices(); tts.addEventListener?.('voiceschanged', loadVoices); }
 
 // Apple's novelty and retro (Eloquence) voices: technically English, but not for reading books.
@@ -554,7 +554,51 @@ function pickVoice(lang) {
       + (/^(ja-jp|en-us)$/.test(v.lang.toLowerCase().replace('_', '-')) ? 0.5 : 0)
       + (/^(Kyoko|Samantha)$/.test(base) ? 0.3 : 0);
   };
+  const chosen = voices.find(v => v.voiceURI === settings.voice?.[lang]);
+  if (chosen) return chosen;
   return voices.filter(v => v.lang.toLowerCase().startsWith(lang)).sort((a, b) => score(b) - score(a))[0] || null;
+}
+
+const voiceQuality = v => /premium|プレミアム/i.test(v.voiceURI + v.name) ? 'プレミアム'
+  : /enhanced|拡張/i.test(v.voiceURI + v.name) ? '拡張' : '';
+
+// Voice pickers on the library screen: exactly the voices Safari exposes to web pages.
+function renderVoices() {
+  for (const lang of ['ja', 'en']) {
+    const sel = $('voice-' + lang);
+    const list = voices.filter(v => v.lang.toLowerCase().startsWith(lang));
+    sel.textContent = '';
+    const auto = pickVoiceAuto(lang);
+    sel.append(new Option(`自動${auto ? `（${auto.name}）` : ''}`, ''));
+    for (const v of list) {
+      const q = voiceQuality(v);
+      const label = v.name + (q && !v.name.includes(q) ? `（${q}）` : '') + (lang === 'en' ? ` ${v.lang}` : '');
+      sel.append(new Option(label, v.voiceURI));
+    }
+    sel.value = list.some(v => v.voiceURI === settings.voice?.[lang]) ? settings.voice[lang] : '';
+  }
+  $('voice-count').textContent = `この端末でSafariが使える声：日本語 ${voices.filter(v => v.lang.startsWith('ja')).length}個 ・ 英語 ${voices.filter(v => v.lang.startsWith('en')).length}個`;
+}
+function pickVoiceAuto(lang) {
+  const saved = settings.voice;
+  settings.voice = {};
+  try { return pickVoice(lang); } finally { settings.voice = saved; }
+}
+function chooseVoice(lang, uri) {
+  settings.voice = { ...settings.voice, [lang]: uri };
+  R.plainVoice = false;
+  saveSettings();
+}
+function previewVoice(lang) {
+  if (!tts) return;
+  tts.cancel();
+  const u = new SpeechSynthesisUtterance(lang === 'ja' ? 'こんにちは。これは読み上げの声のテストです。' : 'Hello. This is a test of the reading voice.');
+  u.lang = lang === 'ja' ? 'ja-JP' : 'en-US';
+  const v = pickVoice(lang);
+  if (v) u.voice = v;
+  u.rate = settings.rate;
+  R.utterance = u;
+  tts.speak(u);
 }
 
 const isSentenceEnd = k => R.tok.ends[k] || SENTENCE_END.test(R.tok.texts[k].replace(TRAILING_CLOSERS, ''));
@@ -591,8 +635,10 @@ function speakFrom(i) {
   const lang = jaCount * 2 >= end - i + 1 ? 'ja' : 'en';
   const u = new SpeechSynthesisUtterance(text);
   u.lang = lang === 'ja' ? 'ja-JP' : 'en-US';
-  const voice = pickVoice(lang);
+  // After a failure with the chosen voice, fall back to the system default for the language.
+  const voice = R.plainVoice ? null : pickVoice(lang);
   if (voice) u.voice = voice;
+  R.utterance = u;  // keep a reference: Safari stops firing events for garbage-collected utterances
   u.rate = settings.rate;
 
   const gen = ++R.gen;
@@ -607,7 +653,11 @@ function speakFrom(i) {
       if (live() && !boundaries) { R.i++; advance(); }
     }, (cum[R.i + 1] - cum[R.i]) * settings.msPerUnit[lang] / settings.rate);
   };
-  u.onstart = () => { if (live() && !started) { started = performance.now(); advance(); } };
+  let audible = false;
+  u.onstart = () => {
+    audible = true;
+    if (live() && !started) { started = performance.now(); advance(); }
+  };
   // Word boundary events (when the voice provides them) are exact, so they replace the timer.
   u.onboundary = ev => {
     if (!live() || ev.name !== 'word') return;
@@ -632,17 +682,41 @@ function speakFrom(i) {
     if (Date.now() - R.lastSave > 3000) savePos();
     speakFrom(R.i);
   };
+  const fail = reason => {
+    if (voice) {  // retry once with the default voice
+      R.plainVoice = true;
+      clearTimeout(R.timer);
+      R.gen++;
+      tts.cancel();
+      R.cancelledAt = performance.now();
+      return speakFrom(i);
+    }
+    pause();
+    notice(`音声を再生できませんでした（${reason}）。\n・消音モード（マナーモード）を解除してください\n・音量を上げてください\n`
+      + '・設定 → アクセシビリティ → 読み上げコンテンツ → 声 で日本語の声が入っているか確認してください');
+  };
   u.onerror = ev => {
     if (!live() || ev.error === 'interrupted' || ev.error === 'canceled') return;
     console.error('speech error', ev.error);
-    pause();
+    fail(ev.error);
   };
 
+  if (tts.paused) tts.resume();
   // Safari can drop an utterance queued right after cancel(), so give it a moment.
   if (performance.now() - R.cancelledAt < 200) setTimeout(() => live() && tts.speak(u), 150);
   else tts.speak(u);
   // Some iOS versions never fire onstart; start the display anyway.
   setTimeout(() => { if (live() && !started) { started = performance.now(); advance(); } }, 700);
+  // Nothing started at all after a few seconds: the speech engine silently refused.
+  setTimeout(() => { if (live() && !audible && !tts.speaking) fail('開始されません'); }, 3000);
+}
+
+function notice(text) {
+  const el = $('notice');
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(notice.timer);
+  notice.timer = setTimeout(() => { el.hidden = true; }, 12000);
 }
 
 /* ---------- Playback ---------- */
@@ -733,6 +807,12 @@ $('fwd').onclick = () => seek(R.i + 10);
 $('slower').onclick = () => setSpeed(-1);
 $('faster').onclick = () => setSpeed(1);
 $('tts').onclick = toggleSpeech;
+$('notice').onclick = () => { $('notice').hidden = true; };
+for (const lang of ['ja', 'en']) {
+  $('voice-' + lang).onchange = ev => chooseVoice(lang, ev.target.value);
+  $('try-' + lang).onclick = () => previewVoice(lang);
+}
+$('voices').hidden = !tts;
 $('tts').hidden = !tts;
 $('smaller').onclick = () => setFont(-4);
 $('larger').onclick = () => setFont(4);
