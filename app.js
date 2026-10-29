@@ -428,10 +428,12 @@ async function renderLibrary() {
 
 /* ---------- Reader ---------- */
 
-const settings = Object.assign({ wpm: 300, font: 40 }, JSON.parse(localStorage.getItem('rsvp-settings') || '{}'));
+// msPerUnit: learned display time per weight unit while reading aloud at rate 1 (see speakFrom).
+const settings = Object.assign({ wpm: 300, font: 40, tts: false, rate: 1, msPerUnit: { ja: 260, en: 380 } },
+  JSON.parse(localStorage.getItem('rsvp-settings') || '{}'));
 const saveSettings = () => localStorage.setItem('rsvp-settings', JSON.stringify(settings));
 
-const R = { meta: null, tok: null, i: 0, playing: false, timer: 0, lastSave: 0, wake: null };
+const R = { meta: null, tok: null, i: 0, playing: false, timer: 0, lastSave: 0, wake: null, gen: 0, cancelledAt: 0 };
 
 async function openBook(meta) {
   busy('開いています…');
@@ -485,7 +487,8 @@ function show() {
     $('post').textContent = t.slice(k + 1);
   }
   $('seek').value = R.i;
-  const mins = Math.ceil((cum[n] - cum[R.i]) * 60 / settings.wpm / 60);
+  const msPer = speaking() ? settings.msPerUnit[cjk[R.i] ? 'ja' : 'en'] / settings.rate : 60000 / settings.wpm;
+  const mins = Math.ceil((cum[n] - cum[R.i]) * msPer / 60000);
   const left = mins >= 60 ? `${Math.floor(mins / 60)}時間${mins % 60}分` : `${mins}分`;
   $('status').textContent = `${n > 1 ? Math.round(R.i / (n - 1) * 100) : 100}% ・ 残り ${left}`;
   if (!R.playing) renderContext();
@@ -527,19 +530,143 @@ function step() {
   }, (cum[R.i + 1] - cum[R.i]) * 60000 / settings.wpm);
 }
 
-async function play() {
+/* ---------- Reading aloud (読み上げ) ---------- */
+
+const tts = 'speechSynthesis' in window ? window.speechSynthesis : null;
+const speaking = () => !!(tts && settings.tts);
+let voices = [];
+const loadVoices = () => { voices = tts.getVoices(); };
+if (tts) { loadVoices(); tts.addEventListener?.('voiceschanged', loadVoices); }
+
+// Apple's novelty and retro (Eloquence) voices: technically English, but not for reading books.
+const ODD_VOICES = new Set(['Albert', 'Bad News', 'Bahh', 'Bells', 'Boing', 'Bubbles', 'Cellos', 'Good News',
+  'Jester', 'Organ', 'Superstar', 'Trinoids', 'Whisper', 'Wobble', 'Zarvox', 'Junior', 'Ralph', 'Fred', 'Kathy',
+  'Princess', 'Deranged', 'Hysterical', 'Pipe Organ', 'Eddy', 'Flo', 'Grandma', 'Grandpa', 'Reed', 'Rocko',
+  'Sandy', 'Shelley']);
+
+// Best installed voice for 'ja' / 'en': premium > enhanced > standard; novelty voices last.
+function pickVoice(lang) {
+  const score = v => {
+    const id = v.voiceURI + ' ' + v.name;
+    const base = v.name.replace(/\s*\(.*\)$/, '');
+    return (/premium/i.test(id) ? 4 : /enhanced|拡張/i.test(id) ? 3 : 1)
+      - (ODD_VOICES.has(base) || /eloquence|speech\.synthesis\.voice/i.test(id) ? 5 : 0)
+      + (/^(ja-jp|en-us)$/.test(v.lang.toLowerCase().replace('_', '-')) ? 0.5 : 0)
+      + (/^(Kyoko|Samantha)$/.test(base) ? 0.3 : 0);
+  };
+  return voices.filter(v => v.lang.toLowerCase().startsWith(lang)).sort((a, b) => score(b) - score(a))[0] || null;
+}
+
+const isSentenceEnd = k => R.tok.ends[k] || SENTENCE_END.test(R.tok.texts[k].replace(TRAILING_CLOSERS, ''));
+
+// Last chunk of the utterance starting at i: the sentence end, or a clause break if the sentence is very long.
+function utteranceEnd(i) {
+  const { texts, n } = R.tok;
+  let chars = 0, j = i;
+  for (; j < n - 1; j++) {
+    chars += texts[j].length;
+    if (isSentenceEnd(j) || chars > 250) break;
+    if (chars > 120 && CLAUSE_END.test(texts[j].replace(TRAILING_CLOSERS, ''))) break;
+  }
+  return j;
+}
+
+function stopSpeech() {
+  R.gen++;
+  if (tts && (tts.speaking || tts.pending)) { tts.cancel(); R.cancelledAt = performance.now(); }
+}
+
+// Speaks chunks i..end as one utterance and steps the display through them in time with the voice.
+function speakFrom(i) {
+  const { texts, cjk, cum } = R.tok;
+  const end = utteranceEnd(i);
+  let text = '', jaCount = 0;
+  const offsets = [];
+  for (let k = i; k <= end; k++) {
+    if (k > i && !(cjk[k] && cjk[k - 1])) text += ' ';
+    offsets.push(text.length);
+    text += texts[k];
+    jaCount += cjk[k];
+  }
+  const lang = jaCount * 2 >= end - i + 1 ? 'ja' : 'en';
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang === 'ja' ? 'ja-JP' : 'en-US';
+  const voice = pickVoice(lang);
+  if (voice) u.voice = voice;
+  u.rate = settings.rate;
+
+  const gen = ++R.gen;
+  let started = 0, boundaries = false;
+  const live = () => gen === R.gen;
+  // Timer-driven display; holds on the last chunk until the voice finishes the sentence.
+  const advance = () => {
+    if (!live()) return;
+    show();
+    if (R.i >= end || boundaries) return;
+    R.timer = setTimeout(() => {
+      if (live() && !boundaries) { R.i++; advance(); }
+    }, (cum[R.i + 1] - cum[R.i]) * settings.msPerUnit[lang] / settings.rate);
+  };
+  u.onstart = () => { if (live() && !started) { started = performance.now(); advance(); } };
+  // Word boundary events (when the voice provides them) are exact, so they replace the timer.
+  u.onboundary = ev => {
+    if (!live() || ev.name !== 'word') return;
+    boundaries = true;
+    clearTimeout(R.timer);
+    let k = 0;
+    while (k + 1 < offsets.length && offsets[k + 1] <= ev.charIndex) k++;
+    if (i + k > R.i) { R.i = i + k; show(); }
+  };
+  u.onend = () => {
+    if (!live()) return;
+    clearTimeout(R.timer);
+    if (started) {
+      // Learn how fast this voice really reads, so the display keeps pace next time.
+      const measured = (performance.now() - started) * settings.rate / (cum[end + 1] - cum[i]);
+      const m = settings.msPerUnit;
+      m[lang] = Math.round(m[lang] * 0.6 + Math.min(Math.max(measured, 80), 900) * 0.4);
+      saveSettings();
+    }
+    if (end >= R.tok.n - 1) { R.i = end; return pause(); }
+    R.i = end + 1;
+    if (Date.now() - R.lastSave > 3000) savePos();
+    speakFrom(R.i);
+  };
+  u.onerror = ev => {
+    if (!live() || ev.error === 'interrupted' || ev.error === 'canceled') return;
+    console.error('speech error', ev.error);
+    pause();
+  };
+
+  // Safari can drop an utterance queued right after cancel(), so give it a moment.
+  if (performance.now() - R.cancelledAt < 200) setTimeout(() => live() && tts.speak(u), 150);
+  else tts.speak(u);
+  // Some iOS versions never fire onstart; start the display anyway.
+  setTimeout(() => { if (live() && !started) { started = performance.now(); advance(); } }, 700);
+}
+
+/* ---------- Playback ---------- */
+
+const run = () => speaking() ? speakFrom(R.i) : step();
+function halt() {
+  clearTimeout(R.timer);
+  stopSpeech();
+}
+
+function play() {
   if (R.playing) return;
   if (R.i >= R.tok.n - 1) R.i = 0;
   R.playing = true;
   $('reader').classList.add('playing');
   $('play').textContent = '⏸';
-  try { R.wake = await navigator.wakeLock?.request('screen'); } catch {}
-  step();
+  navigator.wakeLock?.request('screen').then(w => { if (R.playing) R.wake = w; else w.release(); }, () => {});
+  // Must run synchronously inside the tap: iOS only allows speech started by a user gesture.
+  run();
 }
 
 function pause() {
   if (!R.playing) return;
-  clearTimeout(R.timer);
+  halt();
   R.playing = false;
   $('reader').classList.remove('playing');
   $('play').textContent = '▶';
@@ -553,15 +680,13 @@ const toggle = () => R.playing ? pause() : play();
 
 function seek(i) {
   const was = R.playing;
-  if (was) clearTimeout(R.timer);
+  if (was) halt();
   R.i = Math.min(Math.max(i, 0), R.tok.n - 1);
-  if (was) step(); else { show(); savePos(); }
+  if (was) run(); else { show(); savePos(); }
 }
 
 function sentenceStart() {
-  const { texts, ends } = R.tok;
-  const isEnd = k => ends[k] || SENTENCE_END.test(texts[k].replace(TRAILING_CLOSERS, ''));
-  const start = k => { while (k > 0 && !isEnd(k - 1)) k--; return k; };
+  const start = k => { while (k > 0 && !isSentenceEnd(k - 1)) k--; return k; };
   let s = start(R.i);
   // Already at (or just past) the start of a sentence: go to the previous one.
   if (R.i - s <= 1 && s > 0) s = start(s - 1);
@@ -569,11 +694,27 @@ function sentenceStart() {
 }
 
 function renderSpeed() {
-  $('speed').innerHTML = `${settings.wpm} WPM<small>日本語 約${settings.wpm * 2}字/分</small>`;
+  $('speed').innerHTML = speaking()
+    ? `読み上げ ${settings.rate.toFixed(1)}倍<small>声の速さ</small>`
+    : `${settings.wpm} WPM<small>日本語 約${settings.wpm * 2}字/分</small>`;
+  $('tts').textContent = settings.tts ? '🔊' : '🔈';
+  $('tts').setAttribute('aria-pressed', settings.tts);
+  $('tts').classList.toggle('on', settings.tts);
 }
-function setSpeed(delta) {
-  settings.wpm = Math.min(1000, Math.max(100, settings.wpm + delta));
-  saveSettings(); renderSpeed(); if (!R.playing) show();
+// dir: +1 faster, -1 slower. Adjusts the voice rate while reading aloud, WPM otherwise.
+function setSpeed(dir) {
+  if (speaking()) settings.rate = Math.round(Math.min(2, Math.max(0.5, settings.rate + dir * 0.1)) * 10) / 10;
+  else settings.wpm = Math.min(1000, Math.max(100, settings.wpm + dir * 25));
+  saveSettings(); renderSpeed();
+  if (R.playing && speaking()) { halt(); run(); }  // apply the new rate from the current chunk
+  else if (!R.playing) show();
+}
+function toggleSpeech() {
+  const was = R.playing;
+  if (was) halt();
+  settings.tts = !settings.tts;
+  saveSettings(); renderSpeed();
+  if (was) run(); else show();
 }
 function setFont(delta) {
   settings.font = Math.min(96, Math.max(20, settings.font + delta));
@@ -589,8 +730,10 @@ $('play').onclick = toggle;
 $('sentence').onclick = sentenceStart;
 $('rew').onclick = () => seek(R.i - 10);
 $('fwd').onclick = () => seek(R.i + 10);
-$('slower').onclick = () => setSpeed(-25);
-$('faster').onclick = () => setSpeed(25);
+$('slower').onclick = () => setSpeed(-1);
+$('faster').onclick = () => setSpeed(1);
+$('tts').onclick = toggleSpeech;
+$('tts').hidden = !tts;
 $('smaller').onclick = () => setFont(-4);
 $('larger').onclick = () => setFont(4);
 $('seek').oninput = ev => seek(+ev.target.value);
@@ -602,7 +745,7 @@ document.addEventListener('keydown', ev => {
   if ($('reader').hidden || ev.target.tagName === 'SELECT') return;
   const actions = {
     ' ': toggle, ArrowLeft: () => seek(R.i - 10), ArrowRight: () => seek(R.i + 10),
-    ArrowUp: () => setSpeed(25), ArrowDown: () => setSpeed(-25),
+    ArrowUp: () => setSpeed(1), ArrowDown: () => setSpeed(-1),
   };
   if (actions[ev.key]) { ev.preventDefault(); actions[ev.key](); }
 });
